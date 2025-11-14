@@ -1,269 +1,295 @@
-import {
-    CodeNode,
-    EmNode,
-    ImageNode,
-    InlineNode,
-    LinkNode,
-    StrongNode,
-    TextNode,
-    Token,
-} from "./type";
+import { Token, TokenType } from "./token";
 
-export function lexer(input: string): Token[] {
-    const lines = input.replace(/\r\n/g, "\n").split("\n");
+export class Lexer {
+    private lines: string[];
+    private currentIndex: number = 0;
 
-    const tokens: Token[] = [];
+    constructor(input: string) {
+        this.lines = input.split("\n");
+    }
 
-    let i = 0;
+    tokenize(): Token[] {
+        const tokens: Token[] = [];
 
-    while (i < lines.length) {
-        const raw = lines[i];
-        const lineNum = i;
+        while (this.currentIndex < this.lines.length) {
+            const line = this.lines[this.currentIndex];
+            const token = this.tokenizeLine(line);
 
-        if (/^\s*$/.test(raw)) {
-            tokens.push({ type: "BLANK", raw, line: lineNum });
-            i++;
-            continue;
-        }
-
-        const fenceMatch = raw.match(/^```(\S*)\s*$/);
-        if (fenceMatch) {
-            const lang = fenceMatch[1] || undefined;
-            let j = i + 1;
-            const codeLines: string[] = [];
-            while (j < lines.length && !/^```/.test(lines[j])) {
-                codeLines.push(lines[j]);
-                j++;
+            if (token) {
+                tokens.push(token);
             }
 
-            if (j < lines.length && /^```/.test(lines[j])) {
-                tokens.push({
-                    type: "CODE_FENCE",
-                    raw: codeLines.join("\n"),
-                    line: lineNum,
-                    lang,
+            this.currentIndex++;
+        }
+
+        return this.mergeBlockquotes(tokens);
+    }
+
+    private mergeBlockquotes(tokens: Token[]): Token[] {
+        const result: Token[] = [];
+        let i = 0;
+
+        while (i < tokens.length) {
+            if (tokens[i].type === TokenType.BLOCKQUOTE) {
+                const blockquoteLines: string[] = [tokens[i].value];
+                let j = i + 1;
+
+                while (
+                    j < tokens.length &&
+                    tokens[j].type === TokenType.BLOCKQUOTE
+                ) {
+                    blockquoteLines.push(tokens[j].value);
+                    j++;
+                }
+
+                result.push({
+                    type: TokenType.BLOCKQUOTE,
+                    value: blockquoteLines.join("\n"),
                 });
-                i = j + 1;
-                continue;
-            } else {
-                tokens.push({
-                    type: "CODE_FENCE",
-                    raw: codeLines.join("\n"),
-                    line: lineNum,
-                    lang,
-                });
+
                 i = j;
-                continue;
-            }
-        }
-
-        const h = raw.match(/^(#{1,6})\s+(.*)$/);
-        if (h) {
-            tokens.push({
-                type: "HEADING",
-                raw: h[2],
-                line: lineNum,
-                depth: h[1].length,
-            });
-            i++;
-            continue;
-        }
-
-        if (/^(\*\s*\*\s*\*|-{3,}|_{3,})\s*$/.test(raw)) {
-            tokens.push({ type: "HR", raw, line: lineNum });
-            i++;
-            continue;
-        }
-
-        const bq = raw.match(/^\s*> ?(.*)$/);
-        if (bq) {
-            tokens.push({ type: "BLOCKQUOTE", raw: bq[1], line: lineNum });
-            i++;
-            continue;
-        }
-
-        const ul = raw.match(/^(\s*)([-+*])\s+(.*)$/);
-        if (ul) {
-            const indent = ul[1].length;
-            const customBullet = ul[2];
-
-            tokens.push({
-                type: "UL_ITEM",
-                raw: ul[3],
-                line: lineNum,
-                depth: indent / 2,
-                bullet: customBullet,
-            });
-            i++;
-            continue;
-        }
-
-        const ol = raw.match(/^(\s*)(\d+)\.\s+(.*)$/);
-        if (ol) {
-            const indent = ol[1].length;
-            tokens.push({
-                type: "OL_ITEM",
-                raw: ol[3],
-                line: lineNum,
-                depth: indent / 2,
-            });
-            i++;
-            continue;
-        }
-
-        let j = i;
-        const paraLines: string[] = [];
-        while (
-            j < lines.length &&
-            !/^\s*$/.test(lines[j]) &&
-            !/^(#{1,6})\s+/.test(lines[j]) &&
-            !/^```/.test(lines[j]) &&
-            !/^(\s*)([-+*])\s+/.test(lines[j]) &&
-            !/^(\s*)(\d+)\.\s+/.test(lines[j]) &&
-            !/^>\s?/.test(lines[j]) &&
-            !/^(\*\s*\*\s*\*|-{3,}|_{3,})\s*$/.test(lines[j])
-        ) {
-            paraLines.push(lines[j]);
-            j++;
-        }
-        tokens.push({
-            type: "PARAGRAPH",
-            raw: paraLines.join("\n"),
-            line: lineNum,
-        });
-        i = j;
-    }
-
-    return tokens;
-}
-
-export function parseInline(src: string): InlineNode[] {
-    const out: InlineNode[] = [];
-    let i = 0;
-
-    function peek(n = 0) {
-        return src[i + n];
-    }
-
-    function eof() {
-        return i >= src.length;
-    }
-
-    function consume(n = 1) {
-        const s = src.slice(i, i + n);
-        i += n;
-        return s;
-    }
-
-    function readUntil(pattern: RegExp | string) {
-        let buf = "";
-
-        while (!eof()) {
-            if (typeof pattern === "string") {
-                if (src.startsWith(pattern, i)) break;
             } else {
-                if (pattern.test(src.slice(i))) break;
-            }
-
-            buf += consume(1);
-        }
-
-        return buf;
-    }
-
-    while (!eof()) {
-        if (src.startsWith("![", i)) {
-            i += 2;
-            const alt = readUntil("]");
-
-            if (peek() === "]") consume(1);
-            if (peek() === "(") {
-                consume(1);
-                const href = readUntil(")");
-                if (peek() === ")") consume(1);
-                out.push({ type: "IMAGE", src: href.trim(), alt } as ImageNode);
-                continue;
-            } else {
-                out.push({
-                    type: "TEXT",
-                    value: "![" + alt + (peek() === "]" ? "]" : ""),
-                });
-                continue;
+                result.push(tokens[i]);
+                i++;
             }
         }
 
-        if (peek() === "[") {
-            consume(1);
-            const text = readUntil("]");
-            if (peek() === "]") consume(1);
-            if (peek() === "(") {
-                consume(1);
-                const href = readUntil(")");
-                if (peek() === ")") consume(1);
-                const children = parseInline(text);
-                out.push({
-                    type: "LINK",
-                    href: href.trim(),
-                    children,
-                } as LinkNode);
-                continue;
-            } else {
-                out.push({
-                    type: "TEXT",
-                    value: "[" + text + (peek() === "]" ? "]" : ""),
-                });
-                continue;
+        return result;
+    }
+
+    tokenizeLine(line: string): Token | null {
+        if (line.trim() === "") {
+            return { type: TokenType.BLANK, value: "" };
+        }
+
+        if (this.isHeader(line)) {
+            return this.parseHeader(line);
+        }
+
+        if (this.isHR(line)) {
+            return { type: TokenType.HR, value: line };
+        }
+
+        if (this.isTable(line)) {
+            return this.parseTable();
+        }
+
+        if (this.isCodeFence(line)) {
+            return this.parseCodeFence();
+        }
+
+        if (this.isBlockquote(line)) {
+            return this.parseBlockquote(line);
+        }
+
+        if (this.isList(line)) {
+            return this.parseList(line);
+        }
+
+        return this.parseParagraph(line);
+    }
+
+    private isHeader(line: string): boolean {
+        return /^#{1,6}\s/.test(line);
+    }
+
+    private parseHeader(line: string): Token {
+        const match = line.match(/^(#{1,6})\s+(.+)$/);
+
+        if (match) {
+            return {
+                type: TokenType.HEADER,
+                value: match[2],
+                level: match[1].length,
+            };
+        }
+
+        return { type: TokenType.TEXT, value: line };
+    }
+
+    private isHR(line: string): boolean {
+        return /^([-_*])\1{2,}$/.test(line.trim());
+    }
+
+    private isCodeFence(line: string): boolean {
+        return /^```/.test(line);
+    }
+
+    private parseCodeFence(): Token {
+        const startLine = this.lines[this.currentIndex];
+        const langMatch = startLine.match(/^```(\w+)?/);
+        const lang = langMatch ? langMatch[1] || "" : "";
+
+        let code = "";
+        this.currentIndex++;
+
+        while (this.currentIndex < this.lines.length) {
+            const line = this.lines[this.currentIndex];
+
+            if (line.trim() === "```") {
+                break;
+            }
+
+            code += line + "\n";
+            this.currentIndex++;
+        }
+
+        return {
+            type: TokenType.CODE_FENCE,
+            value: code.trimEnd(),
+            lang,
+        };
+    }
+
+    private isBlockquote(line: string): boolean {
+        return /^>\s/.test(line);
+    }
+
+    private parseBlockquote(line: string): Token {
+        const match = line.match(/^(>+)\s?(.*)$/);
+
+        if (match) {
+            const level = match[1].length;
+            const content = match[2];
+
+            return {
+                type: TokenType.BLOCKQUOTE,
+                value: content,
+                level,
+            };
+        }
+
+        let content = line.replace(/^>\s?/, "");
+
+        return {
+            type: TokenType.BLOCKQUOTE,
+            value: content,
+            level: 1,
+        };
+    }
+
+    private isList(line: string): boolean {
+        return (
+            /^(\s*)[-*+]\s/.test(line) ||
+            /^(\s*)\d+\.\s/.test(line) ||
+            /^(\s*)[-*+]\s\[[ x]\]\s/.test(line)
+        );
+    }
+
+    private parseList(line: string): Token {
+        const checkboxMatch = line.match(/^(\s*)[-*+]\s\[([ x])\]\s(.+)$/);
+
+        if (checkboxMatch) {
+            const indent = checkboxMatch[1].length;
+
+            return {
+                type: TokenType.LIST_ITEM,
+                value: checkboxMatch[3],
+                level: Math.floor(indent / 2),
+                checked: checkboxMatch[2] === "x",
+                listType: "ul",
+            };
+        }
+
+        const ulMatch = line.match(/^(\s*)[-*+]\s(.+)$/);
+
+        if (ulMatch) {
+            const indent = ulMatch[1].length;
+
+            return {
+                type: TokenType.LIST_ITEM,
+                value: ulMatch[2],
+                level: Math.floor(indent / 2),
+                listType: "ul",
+            };
+        }
+
+        const olMatch = line.match(/^(\s*)\d+\.\s(.+)$/);
+
+        if (olMatch) {
+            const indent = olMatch[1].length;
+
+            return {
+                type: TokenType.LIST_ITEM,
+                value: olMatch[2],
+                level: Math.floor(indent / 2),
+                listType: "ol",
+            };
+        }
+
+        return {
+            type: TokenType.TEXT,
+            value: line,
+        };
+    }
+
+    private parseParagraph(line: string): Token {
+        return {
+            type: TokenType.PARAGRAPH,
+            value: line,
+        };
+    }
+
+    private isTable(line: string): boolean {
+        return /^\|/.test(line.trim());
+    }
+
+    private parseTable(): Token {
+        const rows: string[][] = [];
+        const headers: string[] = [];
+        const align: string[] = [];
+
+        const headerLine = this.lines[this.currentIndex].trim();
+
+        if (headerLine.startsWith("|")) {
+            const cols = headerLine.split("|").filter((c) => c.trim());
+            headers.push(...cols.map((c) => c.trim()));
+        }
+
+        this.currentIndex++;
+
+        if (this.currentIndex < this.lines.length) {
+            const alignLine = this.lines[this.currentIndex].trim();
+
+            if (alignLine.startsWith("|") && /[-:]/.test(alignLine)) {
+                const alignCols = alignLine.split("|").filter((c) => c.trim());
+
+                for (const col of alignCols) {
+                    const trimmed = col.trim();
+
+                    if (trimmed.startsWith(":") && trimmed.endsWith(":")) {
+                        align.push("center");
+                    } else if (trimmed.endsWith(":")) {
+                        align.push("right");
+                    } else {
+                        align.push("left");
+                    }
+                }
+
+                this.currentIndex++;
             }
         }
 
-        if (peek() === "`") {
-            consume(1);
-            const code = readUntil("`");
-            if (peek() === "`") consume(1);
-            out.push({ type: "CODE", value: code } as CodeNode);
-            continue;
+        while (this.currentIndex < this.lines.length) {
+            const line = this.lines[this.currentIndex].trim();
+
+            if (!line.startsWith("|")) {
+                break;
+            }
+
+            const cols = line.split("|").filter((c) => c.trim());
+            rows.push(cols.map((c) => c.trim()));
+            this.currentIndex++;
         }
 
-        if (src.startsWith("**", i) || src.startsWith("__", i)) {
-            const delim = consume(2);
-            const inner = readUntil(delim);
-            if (src.startsWith(delim, i)) consume(2);
-            const children = parseInline(inner);
-            out.push({ type: "STRONG", children } as StrongNode);
-            continue;
-        }
+        this.currentIndex--;
 
-        if (peek() === "*" || peek() === "_") {
-            const delim = consume(1);
-            const inner = readUntil(delim);
-            if (peek() === delim) consume(1);
-            const children = parseInline(inner);
-            out.push({ type: "EM", children } as EmNode);
-            continue;
-        }
-
-        const txt = readUntil(/(!\[|\[|`|\*\*|__|\*|_|!|\))/);
-        if (txt.length > 0) out.push({ type: "TEXT", value: txt });
-
-        if (txt.length === 0) {
-            out.push({ type: "TEXT", value: consume(1) });
-        }
+        return {
+            type: TokenType.TABLE,
+            value: "",
+            headers,
+            rows,
+            align: align.length > 0 ? align : headers.map(() => "left"),
+        };
     }
-
-    return mergeAdjacentTextNodes(out);
-}
-
-function mergeAdjacentTextNodes(nodes: InlineNode[]): InlineNode[] {
-    const out: InlineNode[] = [];
-
-    for (const n of nodes) {
-        const last = out[out.length - 1];
-        if (n.type === "TEXT" && last && last.type === "TEXT") {
-            (last as TextNode).value += (n as TextNode).value;
-        } else {
-            out.push(n);
-        }
-    }
-
-    return out;
 }

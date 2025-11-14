@@ -1,124 +1,173 @@
-import {
-    BlockNode,
-    BlockquoteNode,
-    CodeBlockNode,
-    HeadingNode,
-    HRNode,
-    OLNode,
-    ParagraphNode,
-    Token,
-    ULNode,
-} from "./type";
-import { lexer, parseInline } from "./lexer";
+import { Token, TokenType, ASTNode } from "./token";
 
-export function parseTokensToAST(tokens: Token[]): BlockNode[] {
-    const out: BlockNode[] = [];
-    let i = 0;
+export class Parser {
+    private tokens: Token[];
+    private currentIndex: number = 0;
 
-    function parseList(
-        startIndex: number,
-        listType: "UL" | "OL"
-    ): { node: ULNode | OLNode; next: number } {
-        const items: BlockNode[] = [];
-        let idx = startIndex;
-
-        while (idx < tokens.length) {
-            const t = tokens[idx];
-            if (
-                (listType === "UL" && t.type !== "UL_ITEM") ||
-                (listType === "OL" && t.type !== "OL_ITEM")
-            )
-                break;
-
-            // each list item may be simple inline (raw) or multiple lines - we'll treat each item raw as paragraph for now
-            const childParagraph: ParagraphNode = {
-                type: "PARAGRAPH",
-                children: parseInline(t.raw),
-            };
-            items.push(childParagraph);
-            idx++;
-            // detect nested items by depth (simple heuristic) and group - naive: consecutive items with greater depth -> nested list
-            // For brevity, we do not implement deep nesting merging; each item is a paragraph. Could be extended.
-        }
-
-        const node =
-            listType === "UL"
-                ? ({ type: "UL", items } as ULNode)
-                : ({ type: "OL", items } as OLNode);
-        return { node, next: idx };
+    constructor(tokens: Token[]) {
+        this.tokens = tokens;
     }
 
-    while (i < tokens.length) {
-        const t = tokens[i];
+    parse(): ASTNode[] {
+        const ast: ASTNode[] = [];
 
-        switch (t.type) {
-            case "BLANK":
-                i++;
-                continue;
-            case "HEADING":
-                out.push({
-                    type: "HEADING",
-                    level: t.depth || 1,
-                    children: parseInline(t.raw),
-                } as HeadingNode);
-                i++;
-                break;
-            case "HR":
-                out.push({ type: "HR" } as HRNode);
-                i++;
-                break;
-            case "CODE_FENCE":
-                out.push({
-                    type: "CODE",
-                    lang: t.lang,
-                    code: t.raw,
-                } as CodeBlockNode);
-                i++;
-                break;
-            case "BLOCKQUOTE": {
-                // group consecutive blockquote tokens into one blockquote node, parse their inner as markdown recursively
-                const lines: string[] = [];
-                let j = i;
-                while (j < tokens.length && tokens[j].type === "BLOCKQUOTE") {
-                    lines.push(tokens[j].raw);
-                    j++;
-                }
-                const inner = lines.join("\n");
-                const innerTokens = lexer(inner);
-                const innerNodes = parseTokensToAST(innerTokens);
-                out.push({
-                    type: "BLOCKQUOTE",
-                    children: innerNodes,
-                } as BlockquoteNode);
-                i = j;
-                break;
+        while (this.currentIndex < this.tokens.length) {
+            const node = this.parseToken();
+            if (node) {
+                ast.push(node);
             }
-            case "UL_ITEM": {
-                const { node, next } = parseList(i, "UL");
-                out.push(node);
-                i = next;
-                break;
-            }
-            case "OL_ITEM": {
-                const { node, next } = parseList(i, "OL");
-                out.push(node);
-                i = next;
-                break;
-            }
-            case "PARAGRAPH": {
-                out.push({
-                    type: "PARAGRAPH",
-                    children: parseInline(t.raw),
-                } as ParagraphNode);
-                i++;
-                break;
-            }
+            this.currentIndex++;
+        }
+
+        return ast;
+    }
+
+    private parseToken(): ASTNode | null {
+        const token = this.tokens[this.currentIndex];
+
+        switch (token.type) {
+            case TokenType.HEADER:
+                return {
+                    type: TokenType.HEADER,
+                    value: this.parseInline(token.value),
+                    level: token.level,
+                };
+
+            case TokenType.HR:
+                return { type: TokenType.HR };
+
+            case TokenType.CODE_FENCE:
+                return {
+                    type: TokenType.CODE_FENCE,
+                    value: token.value,
+                    lang: token.lang,
+                };
+
+            case TokenType.BLOCKQUOTE:
+                return {
+                    type: TokenType.BLOCKQUOTE,
+                    value: token.value,
+                    level: token.level,
+                };
+
+            case TokenType.LIST_ITEM:
+                return {
+                    type: TokenType.LIST_ITEM,
+                    value: this.parseInline(token.value),
+                    level: token.level,
+                    checked: token.checked,
+                    listType: token.listType,
+                };
+
+            case TokenType.TABLE:
+                return {
+                    type: TokenType.TABLE,
+                    headers: token.headers?.map((h) => this.parseInline(h)),
+                    rows: token.rows?.map((row) =>
+                        row.map((cell) => this.parseInline(cell))
+                    ),
+                    align: token.align,
+                };
+
+            case TokenType.PARAGRAPH:
+                return {
+                    type: TokenType.PARAGRAPH,
+                    value: this.parseInline(token.value),
+                };
+
+            case TokenType.BLANK:
+                return null;
+
             default:
-                i++;
-                break;
+                return { type: TokenType.TEXT, value: token.value };
         }
     }
 
-    return out;
-}
+    private parseInline(text: string): string {
+        let result = text;
 
+        result = this.parseImages(result);
+        result = this.parseLatex(result);
+        result = this.parseCustomHTML(result);
+        result = this.parseStrong(result);
+        result = this.parseEm(result);
+        result = this.parseUnderline(result);
+        result = this.parseStrikethrough(result);
+        result = this.parseCode(result);
+
+        return result;
+    }
+
+    private parseImages(text: string): string {
+        return text.replace(
+            /!\[([^\]]*)\]\(([^)]+)\)(?:\{([^}]+)\})?/g,
+            (_, alt, src, size) => {
+                const sizeAttr = size ? ` data-size="${size}"` : "";
+                return `<img src="${src}" alt="${alt}"${sizeAttr}>`;
+            }
+        );
+    }
+
+    private parseStrong(text: string): string {
+        text = text.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+        text = text.replace(/__([^_]+)__/g, "<strong>$1</strong>");
+        return text;
+    }
+
+    private parseEm(text: string): string {
+        text = text.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+        text = text.replace(/_([^_]+)_/g, "<em>$1</em>");
+        return text;
+    }
+
+    private parseCode(text: string): string {
+        return text.replace(/`([^`]+)`/g, "<code>$1</code>");
+    }
+
+    private parseLatex(text: string): string {
+        return text.replace(/\$([^$]+)\$/g, (_match, latex) => {
+            return `<span class="latex">${this.renderLatex(latex)}</span>`;
+        });
+    }
+
+    private renderLatex(latex: string): string {
+        let html = latex;
+
+        html = html.replace(
+            /\\frac\{([^}]+)\}\{([^}]+)\}/g,
+            '<span class="frac"><span class="frac-num">$1</span><span class="frac-line"></span><span class="frac-den">$2</span></span>'
+        );
+        html = html.replace(
+            /\\sqrt\{([^}]+)\}/g,
+            '<span class="sqrt"><span class="sqrt-symbol">√</span><span class="sqrt-content">$1</span></span>'
+        );
+        html = html.replace(/\\times/g, "×");
+        html = html.replace(/\\div/g, "÷");
+        html = html.replace(/\\pm/g, "±");
+        html = html.replace(/\\leq/g, "≤");
+        html = html.replace(/\\geq/g, "≥");
+        html = html.replace(/\\neq/g, "≠");
+        html = html.replace(/\\approx/g, "≈");
+        html = html.replace(/\\infty/g, "∞");
+
+        return html;
+    }
+
+    private parseCustomHTML(text: string): string {
+        text = text.replace(
+            /<font\s+color="([^"]+)">([^<]+)<\/font>/g,
+            '<span style="color: $1">$2</span>'
+        );
+        text = text.replace(/<up>([^<]+)<\/up>/g, "<sup>$1</sup>");
+        text = text.replace(/<down>([^<]+)<\/down>/g, "<sub>$1</sub>");
+        return text;
+    }
+
+    private parseUnderline(text: string): string {
+        return text.replace(/<u>([^<]+)<\/u>/g, "<u>$1</u>");
+    }
+
+    private parseStrikethrough(text: string): string {
+        return text.replace(/~~([^~]+)~~/g, "<s>$1</s>");
+    }
+}

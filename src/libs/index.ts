@@ -544,7 +544,7 @@ export default class Html {
     /**
      * Set the value property on input elements.
      */
-    val(str: string): Html {
+    setValue(str: string): Html {
         if (
             this.elm instanceof HTMLInputElement ||
             this.elm instanceof HTMLTextAreaElement ||
