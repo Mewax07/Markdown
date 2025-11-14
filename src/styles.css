@@ -15,3 +15,13 @@ body {
     font-family: Inter, sans-serif;
     overflow: hidden;
 }
+
+ul {
+    list-style-type: disc;
+    margin: 8px 0;
+    padding-left: 24px;
+}
+
+li {
+    margin: 4px 0;
+}
